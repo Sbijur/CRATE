@@ -83,7 +83,8 @@ API_KEY = os.environ.get("CRATE_API_KEY")
 async def check_api_key(request: Request, call_next):
     if API_KEY and request.url.path.startswith("/api/"):
         if request.headers.get("x-crate-key") != API_KEY:
-            raise HTTPException(status_code=401, detail="Missing or incorrect x-crate-key header.")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Missing or incorrect x-crate-key header."})
     return await call_next(request)
 
 
@@ -103,6 +104,15 @@ CLIENT_ID = os.environ.get("YTM_CLIENT_ID") or _local_creds.get("client_id")
 CLIENT_SECRET = os.environ.get("YTM_CLIENT_SECRET") or _local_creds.get("client_secret")
 
 youtube = None  # the authenticated googleapiclient service, once signed in
+
+# For deployment: paste the full contents of google_token.json (from a local
+# sign-in) into this env var instead of committing the file to git. "Sign in
+# with Google" itself can't work on a remote host — it opens a browser on
+# whatever machine runs this process, which for Render etc. isn't yours.
+# Sign in locally once, then transfer the token this way.
+_token_json = os.environ.get("GOOGLE_TOKEN_JSON")
+if _token_json and not TOKEN_PATH.exists():
+    TOKEN_PATH.write_text(_token_json)
 
 
 def build_service_from_saved_token():
