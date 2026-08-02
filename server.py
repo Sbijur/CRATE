@@ -315,9 +315,7 @@ def normalize_playlist_item(item, meta):
 # Search — real official API, no more scraping
 # --------------------------------------------------------------------------
 
-@app.get("/api/search")
-def search(q: str = Query(...), limit: int = 12):
-    require_auth()
+def do_search(q, limit, exclude_video_id=None):
     try:
         # Over-fetch a bit so that after prioritizing clean "Topic" channel
         # uploads (YouTube's auto-generated canonical song entries — the
@@ -330,6 +328,8 @@ def search(q: str = Query(...), limit: int = 12):
     except HttpError as e:
         raise HTTPException(status_code=502, detail=f"YouTube search failed: {e}")
     items = resp.get("items", [])
+    if exclude_video_id:
+        items = [it for it in items if it.get("id", {}).get("videoId") != exclude_video_id]
     video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
     durations = fetch_durations(video_ids)
 
@@ -349,11 +349,23 @@ def search(q: str = Query(...), limit: int = 12):
     return (topic_items + other_items)[:limit]
 
 
+@app.get("/api/search")
+def search(q: str = Query(...), limit: int = 12):
+    require_auth()
+    return do_search(q, limit)
+
+
 # --------------------------------------------------------------------------
-# History / radio — no official equivalent exists for either. Returning
-# empty is intentional, not a bug — the frontend already handles this
-# gracefully, and CRATE's recommendation algorithm doesn't depend on
-# history anyway (it's built primarily from your playlists).
+# History — no official equivalent exists. Returning empty is intentional,
+# not a bug — the frontend handles this gracefully, and CRATE's
+# recommendation algorithm doesn't depend on history anyway (it's built
+# primarily from your playlists).
+#
+# Radio — there's no official "up next"/related-videos endpoint either
+# (YouTube deprecated the old relatedToVideoId search parameter). This is
+# the closest honest substitute available: search by the track's own
+# artist, excluding the track itself, as a real auto-generated "more like
+# this" queue for standalone plays.
 # --------------------------------------------------------------------------
 
 @app.get("/api/history")
@@ -362,8 +374,11 @@ def history():
 
 
 @app.get("/api/radio/{video_id}")
-def radio(video_id: str, limit: int = 10):
-    return []
+def radio(video_id: str, artist: str = Query(None), limit: int = 10):
+    require_auth()
+    if not artist:
+        return []
+    return do_search(artist, limit, exclude_video_id=video_id)
 
 
 # --------------------------------------------------------------------------
