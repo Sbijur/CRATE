@@ -174,8 +174,6 @@ export default function CrateApp() {
   const [ytResults, setYtResults] = useState([]);
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState(null);
-  const [ytRadio, setYtRadio] = useState([]);
-  const [ytRadioLoading, setYtRadioLoading] = useState(false);
   const [ytImporting, setYtImporting] = useState(false);
 
   /* ---------------- real YouTube IFrame Player ---------------- */
@@ -409,31 +407,34 @@ export default function CrateApp() {
   // What plays next follows whichever list you actually pressed play from —
   // a search result, a crate, Fresh Picks, etc. A standalone song (clicked
   // with no list context, e.g. Pick of the Day) instead gets its own
-  // auto-generated "radio" queue (via the effect above) — and once that
-  // exists, playing through it doesn't regenerate it, only clicking
-  // something genuinely outside it does.
-  const activeQueueRef = useRef([]);
+  // auto-generated "radio" queue — and once that exists, playing through
+  // it doesn't regenerate it, only clicking something genuinely outside it
+  // does.
+  //
+  // This queue is real React state (not a ref) on purpose: it's both the
+  // playback authority (advance() reads it) AND the visible "Up Next"
+  // list — a single source of truth, so the two can never drift out of
+  // sync with each other the way a ref + separate display state can.
+  const [queue, setQueue] = useState([]);         // ordered array of song objects
+  const [queueLoading, setQueueLoading] = useState(false);
+  const queueRef = useRef([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
   const standaloneRef = useRef(false);
   const stallWatchdogRef = useRef(null);
+  const pendingAdvanceRef = useRef(null);
 
   /* ---------------- playback (real YouTube IFrame Player) ---------------- */
 
-  function playSong(id, contextSongs, clearRadio = true) {
+  function playSong(id, contextSongs) {
     const song = resolve(id);
     if (!song) return;
     if (contextSongs && contextSongs.length) {
-      activeQueueRef.current = contextSongs.map((s) => s.id);
+      setQueue(contextSongs);
       standaloneRef.current = false;
-      // Only clear the auto-playlist display when genuinely switching to a
-      // different explicit list (a crate, Fresh Picks, search results) —
-      // advance() also passes contextSongs just to continue the CURRENT
-      // queue, and clearing here would wipe the radio display on every
-      // single track change within its own queue.
-      if (clearRadio) setYtRadio([]);
-    } else if (activeQueueRef.current.includes(id)) {
+    } else if (queueRef.current.some((s) => s.id === id)) {
       standaloneRef.current = false; // already part of the current queue/radio — leave it exactly as-is
     } else {
-      activeQueueRef.current = [id]; // placeholder until the fetch below fills it in
+      setQueue([song]); // placeholder until the fetch below fills it in
       standaloneRef.current = true; // genuinely new standalone song — generate its own queue
       generateRadioFor(song);
     }
@@ -475,15 +476,9 @@ export default function CrateApp() {
     }
   }
 
-  // Generates the standalone "auto-playlist" for a song — called directly
-  // from playSong rather than via a useEffect keyed on nowPlaying, since
-  // re-clicking an already-playing track leaves nowPlaying unchanged and a
-  // React effect wouldn't re-fire for that (this will, every time).
-  const pendingAdvanceRef = useRef(null);
-
   function generateRadioFor(song) {
-    if (!ytServer) { setYtRadio([]); return; }
-    setYtRadioLoading(true);
+    if (!ytServer) return;
+    setQueueLoading(true);
     apiFetch(`/api/radio/${song.videoId}?limit=8&artist=${encodeURIComponent(song.artist)}&title=${encodeURIComponent(song.title)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((items) => {
@@ -493,8 +488,7 @@ export default function CrateApp() {
           tracks.forEach((t) => (merged[t.id] = t));
           return merged;
         });
-        activeQueueRef.current = [song.id, ...tracks.map((t) => t.id)];
-        setYtRadio(tracks);
+        setQueue([song, ...tracks]);
         // If "next" was clicked (or the track ended) before this fetch
         // resolved, that request was deferred instead of wrapping back
         // onto the same song — apply it now that the real queue exists.
@@ -504,12 +498,12 @@ export default function CrateApp() {
           advanceRef.current(dir);
         }
       })
-      .catch(() => setYtRadio([]))
-      .finally(() => setYtRadioLoading(false));
+      .catch(() => setQueue([song]))
+      .finally(() => setQueueLoading(false));
   }
 
   function advance(dir) {
-    const ids = activeQueueRef.current.length ? activeQueueRef.current : rec.items.map((s) => s.id);
+    const ids = (queueRef.current.length ? queueRef.current : rec.items).map((s) => s.id);
     // While a standalone song's radio is still being generated, the queue
     // is just a one-song placeholder — advancing would mathematically
     // wrap back onto that same song and (worse) permanently mark it as
@@ -523,7 +517,7 @@ export default function CrateApp() {
     let next;
     if (idx === -1) next = ids[0];
     else next = ids[(idx + dir + ids.length) % ids.length];
-    if (next != null) playSong(next, ids.map(resolve).filter(Boolean), false);
+    if (next != null) playSong(next, queueRef.current.length ? queueRef.current : rec.items);
   }
   useEffect(() => { advanceRef.current = advance; });
 
@@ -740,11 +734,25 @@ export default function CrateApp() {
         </header>
 
         <div className="content">
-          {ytServer && current && (ytRadioLoading || ytRadio.length > 0) && (
-            <Section title="Your auto-playlist" sub={ytRadioLoading ? "Loading the radio queue…" : `Generated for “${current.title}” — stays put until you play something outside it`}>
-              {ytRadio.length > 0 && (
-                <TrackList songs={ytRadio} nowPlaying={nowPlaying} isPlaying={isPlaying} liked={liked} crates={crates} onPlay={(id) => playSong(id, ytRadio)} onLike={toggleLike} onAdd={addToCrate} />
-              )}
+          {current && (queueLoading || queue.length > 1) && (
+            <Section
+              title="Up Next"
+              sub={
+                queueLoading ? "Finding more like this…"
+                : standaloneRef.current ? `Generated for “${current.title}”`
+                : "Continuing this list"
+              }
+            >
+              <TrackList
+                songs={queue.filter((s) => s.id !== nowPlaying)}
+                nowPlaying={nowPlaying}
+                isPlaying={isPlaying}
+                liked={liked}
+                crates={crates}
+                onPlay={(id) => playSong(id, queue)}
+                onLike={toggleLike}
+                onAdd={addToCrate}
+              />
             </Section>
           )}
 
