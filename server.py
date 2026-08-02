@@ -315,7 +315,14 @@ def normalize_playlist_item(item, meta):
 # Search — real official API, no more scraping
 # --------------------------------------------------------------------------
 
-def do_search(q, limit, exclude_video_id=None):
+def normalize_title_for_dedup(title):
+    t = title.lower()
+    t = re.sub(r"[\(\[].*?[\)\]]", "", t)  # strip "(Official Video)", "[Lyrics]", etc.
+    t = re.sub(r"[^a-z0-9]+", " ", t).strip()
+    return t
+
+
+def do_search(q, limit, exclude_video_id=None, exclude_title=None):
     try:
         # Over-fetch a bit so that after prioritizing clean "Topic" channel
         # uploads (YouTube's auto-generated canonical song entries — the
@@ -330,6 +337,24 @@ def do_search(q, limit, exclude_video_id=None):
     items = resp.get("items", [])
     if exclude_video_id:
         items = [it for it in items if it.get("id", {}).get("videoId") != exclude_video_id]
+
+    # The same song frequently exists as multiple separate re-uploads with
+    # different video IDs — excluding just the one exact ID isn't enough,
+    # or "radio" ends up looping back onto the same track it started from.
+    # Dedupe by normalized title: against the seed track, AND among the
+    # results themselves.
+    seen_titles = set()
+    if exclude_title:
+        seen_titles.add(normalize_title_for_dedup(exclude_title))
+    deduped = []
+    for it in items:
+        key = normalize_title_for_dedup(it["snippet"].get("title", ""))
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        deduped.append(it)
+    items = deduped
+
     video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
     durations = fetch_durations(video_ids)
 
@@ -374,11 +399,11 @@ def history():
 
 
 @app.get("/api/radio/{video_id}")
-def radio(video_id: str, artist: str = Query(None), limit: int = 10):
+def radio(video_id: str, artist: str = Query(None), title: str = Query(None), limit: int = 10):
     require_auth()
     if not artist:
         return []
-    return do_search(artist, limit, exclude_video_id=video_id)
+    return do_search(artist, limit, exclude_video_id=video_id, exclude_title=title)
 
 
 # --------------------------------------------------------------------------
