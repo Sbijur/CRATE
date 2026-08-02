@@ -449,7 +449,11 @@ export default function CrateApp() {
   /* ---------------- playback (real YouTube IFrame Player) ---------------- */
 
   function playSong(id, contextSongs) {
-    const song = resolve(id);
+    // resolve() reads ytTracks state, which may not have "caught up" yet
+    // if this is called immediately after setYtTracks() in the same tick
+    // (extendQueue does exactly this) — contextSongs, when provided,
+    // already has the full track objects as a reliable fallback.
+    const song = resolve(id) || (contextSongs && contextSongs.find((s) => s.id === id));
     if (!song) return;
     const alreadyInQueue = queueRef.current.some((s) => s.id === id);
     if (alreadyInQueue) {
@@ -585,6 +589,7 @@ export default function CrateApp() {
         const newQueue = [...currentQueue, ...tracks];
         setQueue(newQueue);
         playSong(tracks[0].id, newQueue);
+        standaloneRef.current = true; // we're still in radio mode, just extended — playSong's queue check ran against stale state and would have cleared this
       })
       .catch(() => {
         const ids = currentQueue.map((s) => s.id);
