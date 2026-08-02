@@ -418,13 +418,18 @@ export default function CrateApp() {
 
   /* ---------------- playback (real YouTube IFrame Player) ---------------- */
 
-  function playSong(id, contextSongs) {
+  function playSong(id, contextSongs, clearRadio = true) {
     const song = resolve(id);
     if (!song) return;
     if (contextSongs && contextSongs.length) {
       activeQueueRef.current = contextSongs.map((s) => s.id);
       standaloneRef.current = false;
-      setYtRadio([]); // playing a real playlist/Fresh Picks now — hide the old auto-playlist display
+      // Only clear the auto-playlist display when genuinely switching to a
+      // different explicit list (a crate, Fresh Picks, search results) —
+      // advance() also passes contextSongs just to continue the CURRENT
+      // queue, and clearing here would wipe the radio display on every
+      // single track change within its own queue.
+      if (clearRadio) setYtRadio([]);
     } else if (activeQueueRef.current.includes(id)) {
       standaloneRef.current = false; // already part of the current queue/radio — leave it exactly as-is
     } else {
@@ -499,7 +504,7 @@ export default function CrateApp() {
     let next;
     if (idx === -1) next = ids[0];
     else next = ids[(idx + dir + ids.length) % ids.length];
-    if (next != null) playSong(next, ids.map(resolve).filter(Boolean));
+    if (next != null) playSong(next, ids.map(resolve).filter(Boolean), false);
   }
   useEffect(() => { advanceRef.current = advance; });
 
