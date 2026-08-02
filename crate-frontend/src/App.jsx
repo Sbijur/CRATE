@@ -451,11 +451,18 @@ export default function CrateApp() {
   function playSong(id, contextSongs) {
     const song = resolve(id);
     if (!song) return;
-    if (contextSongs && contextSongs.length) {
+    const alreadyInQueue = queueRef.current.some((s) => s.id === id);
+    if (alreadyInQueue) {
+      // Continuing within (or replaying something from) the queue we're
+      // already in — leave the queue and its standalone/radio status
+      // completely untouched. This is what makes "reached the end of a
+      // radio queue" still recognizable as a radio queue.
+    } else if (contextSongs && contextSongs.length) {
+      // Genuinely switching to a different explicit list (a crate, Fresh
+      // Picks, search results, or the queue panel with a track not
+      // already in the current queue).
       setQueue(contextSongs);
       standaloneRef.current = false;
-    } else if (queueRef.current.some((s) => s.id === id)) {
-      standaloneRef.current = false; // already part of the current queue/radio — leave it exactly as-is
     } else {
       setQueue([song]); // placeholder until the fetch below fills it in
       standaloneRef.current = true; // genuinely new standalone song — generate its own queue
@@ -951,7 +958,6 @@ export default function CrateApp() {
                   title="Up next"
                 >
                   <ListMusic size={16} />
-                  <span className="queue-badge">{queue.length}</span>
                 </button>
               )}
               <Volume2 size={15} />
@@ -1189,8 +1195,8 @@ function TrackAdd({ crates, onAdd }) {
 
 /* ------------------------------------------------------------------ */
 const CSS = `
-html, body, #root { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: none !important; height: 100% !important; }
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap');
+html, body, #root { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: none !important; height: 100% !important; }
 
 .crate-app {
   --bg: #17130F; --surface: #1F1A15; --surface2: #291F19; --border: #3A2E23;
@@ -1345,7 +1351,6 @@ html, body, #root { margin: 0 !important; padding: 0 !important; width: 100% !im
 .queue-float-head button { color: var(--text-dim); flex-shrink: 0; }
 .queue-float-head button:hover { color: var(--text); }
 .queue-float-body { overflow-y: auto; padding: 4px 10px; }
-.queue-badge { position: absolute; top: 2px; right: 2px; background: var(--gold); color: #17130F; font-size: 9px; font-weight: 700; border-radius: 8px; min-width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; padding: 0 3px; font-family: 'Space Mono', monospace; }
 .icon-btn { position: relative; }
 .icon-btn.active-toggle { color: var(--gold); background: var(--surface2); }
 
