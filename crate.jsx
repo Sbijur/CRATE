@@ -136,6 +136,10 @@ export default function CrateApp() {
   const [liked, setLiked] = useState(new Set());
   const [nowPlaying, setNowPlaying] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const nowPlayingRef = useRef(null);
+  const isPlayingRef = useRef(false);
+  useEffect(() => { nowPlayingRef.current = nowPlaying; }, [nowPlaying]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(70);
@@ -410,6 +414,7 @@ export default function CrateApp() {
   // something genuinely outside it does.
   const activeQueueRef = useRef([]);
   const standaloneRef = useRef(false);
+  const stallWatchdogRef = useRef(null);
 
   /* ---------------- playback (real YouTube IFrame Player) ---------------- */
 
@@ -432,11 +437,25 @@ export default function CrateApp() {
     setDuration(song.dur || 0);
     pendingVideoIdRef.current = song.videoId;
     setEverPlayed(true);
-    setHistory((h) => [{ songId: id, at: Date.now() }, ...h].slice(0, 40));
+    setHistory((h) => [{ songId: id, at: Date.now() }, ...h.filter((entry) => entry.songId !== id)].slice(0, 40));
     setSessionHistory((h) => [{ songId: id, at: Date.now() }, ...h].slice(0, 60));
     if (playerRef.current && playerRef.current.loadVideoById) {
       playerRef.current.loadVideoById(song.videoId);
     }
+
+    // Watchdog: some tracks (age-restricted content is the classic case)
+    // don't fire a proper onError — the player just sits there requiring
+    // manual confirmation inside the embed instead. If playback hasn't
+    // actually started within a few seconds, treat it as unplayable and
+    // skip ahead rather than leaving it stuck.
+    if (stallWatchdogRef.current) clearTimeout(stallWatchdogRef.current);
+    const watchdogId = id;
+    stallWatchdogRef.current = setTimeout(() => {
+      if (nowPlayingRef.current === watchdogId && !isPlayingRef.current) {
+        console.warn(`Track never started (possibly age-restricted or region-locked) — skipping.`);
+        advanceRef.current(1);
+      }
+    }, 10000);
 
     // Exhaustion check: only counts plays of tracks that are actually IN
     // the current Fresh Picks list.
@@ -458,7 +477,7 @@ export default function CrateApp() {
   function generateRadioFor(song) {
     if (!ytServer) { setYtRadio([]); return; }
     setYtRadioLoading(true);
-    apiFetch(`/api/radio/${song.videoId}?limit=8`)
+    apiFetch(`/api/radio/${song.videoId}?limit=8&artist=${encodeURIComponent(song.artist)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((items) => {
         const tracks = items.map(trackFromApi);
@@ -510,9 +529,27 @@ export default function CrateApp() {
         onReady: (e) => { e.target.setVolume(volume); e.target.playVideo(); },
         onStateChange: (e) => {
           const S = window.YT.PlayerState;
+          // Any state change at all (buffering, paused, whatever) proves
+          // the player is actually alive and responding — cancel the
+          // stall watchdog so it doesn't yank away a track that was just
+          // slow to buffer, not actually broken.
+          if (e.data !== S.UNSTARTED && stallWatchdogRef.current) {
+            clearTimeout(stallWatchdogRef.current);
+            stallWatchdogRef.current = null;
+          }
           if (e.data === S.PLAYING) setIsPlaying(true);
           else if (e.data === S.PAUSED) setIsPlaying(false);
           else if (e.data === S.ENDED) advanceRef.current(1);
+        },
+        onError: (e) => {
+          // Error codes: 2=invalid ID, 5=HTML5 player error, 100=not found/
+          // removed/private, 101/150=embedding disabled by the owner.
+          // Without this, an unplayable video just sits frozen at 0:00
+          // forever — this is exactly that bug. Skip to the next track
+          // automatically instead.
+          console.warn(`Track unplayable (error ${e.data}) — skipping.`);
+          setIsPlaying(false);
+          advanceRef.current(1);
         },
       },
     });
