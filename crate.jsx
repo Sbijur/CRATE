@@ -136,6 +136,10 @@ export default function CrateApp() {
   const [liked, setLiked] = useState(new Set());
   const [nowPlaying, setNowPlaying] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const nowPlayingRef = useRef(null);
+  const isPlayingRef = useRef(false);
+  useEffect(() => { nowPlayingRef.current = nowPlaying; }, [nowPlaying]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(70);
@@ -170,8 +174,6 @@ export default function CrateApp() {
   const [ytResults, setYtResults] = useState([]);
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState(null);
-  const [ytRadio, setYtRadio] = useState([]);
-  const [ytRadioLoading, setYtRadioLoading] = useState(false);
   const [ytImporting, setYtImporting] = useState(false);
 
   /* ---------------- real YouTube IFrame Player ---------------- */
@@ -191,7 +193,7 @@ export default function CrateApp() {
     setYtError(null);
     const handle = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=12`);
+        const res = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=24`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || `Server responded ${res.status}`);
@@ -405,11 +407,21 @@ export default function CrateApp() {
   // What plays next follows whichever list you actually pressed play from —
   // a search result, a crate, Fresh Picks, etc. A standalone song (clicked
   // with no list context, e.g. Pick of the Day) instead gets its own
-  // auto-generated "radio" queue (via the effect above) — and once that
-  // exists, playing through it doesn't regenerate it, only clicking
-  // something genuinely outside it does.
-  const activeQueueRef = useRef([]);
+  // auto-generated "radio" queue — and once that exists, playing through
+  // it doesn't regenerate it, only clicking something genuinely outside it
+  // does.
+  //
+  // This queue is real React state (not a ref) on purpose: it's both the
+  // playback authority (advance() reads it) AND the visible "Up Next"
+  // list — a single source of truth, so the two can never drift out of
+  // sync with each other the way a ref + separate display state can.
+  const [queue, setQueue] = useState([]);         // ordered array of song objects
+  const [queueLoading, setQueueLoading] = useState(false);
+  const queueRef = useRef([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
   const standaloneRef = useRef(false);
+  const stallWatchdogRef = useRef(null);
+  const pendingAdvanceRef = useRef(null);
 
   /* ---------------- playback (real YouTube IFrame Player) ---------------- */
 
@@ -417,13 +429,12 @@ export default function CrateApp() {
     const song = resolve(id);
     if (!song) return;
     if (contextSongs && contextSongs.length) {
-      activeQueueRef.current = contextSongs.map((s) => s.id);
+      setQueue(contextSongs);
       standaloneRef.current = false;
-      setYtRadio([]); // playing a real playlist/Fresh Picks now — hide the old auto-playlist display
-    } else if (activeQueueRef.current.includes(id)) {
+    } else if (queueRef.current.some((s) => s.id === id)) {
       standaloneRef.current = false; // already part of the current queue/radio — leave it exactly as-is
     } else {
-      activeQueueRef.current = [id]; // placeholder until the fetch below fills it in
+      setQueue([song]); // placeholder until the fetch below fills it in
       standaloneRef.current = true; // genuinely new standalone song — generate its own queue
       generateRadioFor(song);
     }
@@ -432,11 +443,25 @@ export default function CrateApp() {
     setDuration(song.dur || 0);
     pendingVideoIdRef.current = song.videoId;
     setEverPlayed(true);
-    setHistory((h) => [{ songId: id, at: Date.now() }, ...h].slice(0, 40));
+    setHistory((h) => [{ songId: id, at: Date.now() }, ...h.filter((entry) => entry.songId !== id)].slice(0, 40));
     setSessionHistory((h) => [{ songId: id, at: Date.now() }, ...h].slice(0, 60));
     if (playerRef.current && playerRef.current.loadVideoById) {
       playerRef.current.loadVideoById(song.videoId);
     }
+
+    // Watchdog: some tracks (age-restricted content is the classic case)
+    // don't fire a proper onError — the player just sits there requiring
+    // manual confirmation inside the embed instead. If playback hasn't
+    // actually started within a few seconds, treat it as unplayable and
+    // skip ahead rather than leaving it stuck.
+    if (stallWatchdogRef.current) clearTimeout(stallWatchdogRef.current);
+    const watchdogId = id;
+    stallWatchdogRef.current = setTimeout(() => {
+      if (nowPlayingRef.current === watchdogId && !isPlayingRef.current) {
+        console.warn(`Track never started (possibly age-restricted or region-locked) — skipping.`);
+        advanceRef.current(1);
+      }
+    }, 10000);
 
     // Exhaustion check: only counts plays of tracks that are actually IN
     // the current Fresh Picks list.
@@ -451,14 +476,10 @@ export default function CrateApp() {
     }
   }
 
-  // Generates the standalone "auto-playlist" for a song — called directly
-  // from playSong rather than via a useEffect keyed on nowPlaying, since
-  // re-clicking an already-playing track leaves nowPlaying unchanged and a
-  // React effect wouldn't re-fire for that (this will, every time).
   function generateRadioFor(song) {
-    if (!ytServer) { setYtRadio([]); return; }
-    setYtRadioLoading(true);
-    apiFetch(`/api/radio/${song.videoId}?limit=8`)
+    if (!ytServer) return;
+    setQueueLoading(true);
+    apiFetch(`/api/radio/${song.videoId}?limit=8&artist=${encodeURIComponent(song.artist)}&title=${encodeURIComponent(song.title)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((items) => {
         const tracks = items.map(trackFromApi);
@@ -467,20 +488,36 @@ export default function CrateApp() {
           tracks.forEach((t) => (merged[t.id] = t));
           return merged;
         });
-        activeQueueRef.current = [song.id, ...tracks.map((t) => t.id)];
-        setYtRadio(tracks);
+        setQueue([song, ...tracks]);
+        // If "next" was clicked (or the track ended) before this fetch
+        // resolved, that request was deferred instead of wrapping back
+        // onto the same song — apply it now that the real queue exists.
+        if (pendingAdvanceRef.current != null) {
+          const dir = pendingAdvanceRef.current;
+          pendingAdvanceRef.current = null;
+          advanceRef.current(dir);
+        }
       })
-      .catch(() => setYtRadio([]))
-      .finally(() => setYtRadioLoading(false));
+      .catch(() => setQueue([song]))
+      .finally(() => setQueueLoading(false));
   }
 
   function advance(dir) {
-    const ids = activeQueueRef.current.length ? activeQueueRef.current : rec.items.map((s) => s.id);
+    const ids = (queueRef.current.length ? queueRef.current : rec.items).map((s) => s.id);
+    // While a standalone song's radio is still being generated, the queue
+    // is just a one-song placeholder — advancing would mathematically
+    // wrap back onto that same song and (worse) permanently mark it as
+    // "already queued," disabling radio generation for it entirely.
+    // Defer the skip instead of doing that.
+    if (ids.length <= 1 && standaloneRef.current) {
+      pendingAdvanceRef.current = dir;
+      return;
+    }
     const idx = ids.indexOf(nowPlaying);
     let next;
     if (idx === -1) next = ids[0];
     else next = ids[(idx + dir + ids.length) % ids.length];
-    if (next != null) playSong(next, ids.map(resolve).filter(Boolean));
+    if (next != null) playSong(next, queueRef.current.length ? queueRef.current : rec.items);
   }
   useEffect(() => { advanceRef.current = advance; });
 
@@ -510,9 +547,27 @@ export default function CrateApp() {
         onReady: (e) => { e.target.setVolume(volume); e.target.playVideo(); },
         onStateChange: (e) => {
           const S = window.YT.PlayerState;
+          // Any state change at all (buffering, paused, whatever) proves
+          // the player is actually alive and responding — cancel the
+          // stall watchdog so it doesn't yank away a track that was just
+          // slow to buffer, not actually broken.
+          if (e.data !== S.UNSTARTED && stallWatchdogRef.current) {
+            clearTimeout(stallWatchdogRef.current);
+            stallWatchdogRef.current = null;
+          }
           if (e.data === S.PLAYING) setIsPlaying(true);
           else if (e.data === S.PAUSED) setIsPlaying(false);
           else if (e.data === S.ENDED) advanceRef.current(1);
+        },
+        onError: (e) => {
+          // Error codes: 2=invalid ID, 5=HTML5 player error, 100=not found/
+          // removed/private, 101/150=embedding disabled by the owner.
+          // Without this, an unplayable video just sits frozen at 0:00
+          // forever — this is exactly that bug. Skip to the next track
+          // automatically instead.
+          console.warn(`Track unplayable (error ${e.data}) — skipping.`);
+          setIsPlaying(false);
+          advanceRef.current(1);
         },
       },
     });
@@ -581,7 +636,7 @@ export default function CrateApp() {
 
   const current = nowPlaying != null ? resolve(nowPlaying) : null;
   const ytResultSongs = ytResults.map(resolve).filter(Boolean);
-  const crateNames = Object.keys(crates);
+  const crateNames = Object.keys(crates).filter((name) => crates[name].length > 0);
 
   return (
     <div className="crate-app">
@@ -679,11 +734,25 @@ export default function CrateApp() {
         </header>
 
         <div className="content">
-          {ytServer && current && (ytRadioLoading || ytRadio.length > 0) && (
-            <Section title="Your auto-playlist" sub={ytRadioLoading ? "Loading the radio queue…" : `Generated for “${current.title}” — stays put until you play something outside it`}>
-              {ytRadio.length > 0 && (
-                <TrackList songs={ytRadio} nowPlaying={nowPlaying} isPlaying={isPlaying} liked={liked} crates={crates} onPlay={(id) => playSong(id, ytRadio)} onLike={toggleLike} onAdd={addToCrate} />
-              )}
+          {current && (queueLoading || queue.length > 1) && (
+            <Section
+              title="Up Next"
+              sub={
+                queueLoading ? "Finding more like this…"
+                : standaloneRef.current ? `Generated for “${current.title}”`
+                : "Continuing this list"
+              }
+            >
+              <TrackList
+                songs={queue.filter((s) => s.id !== nowPlaying)}
+                nowPlaying={nowPlaying}
+                isPlaying={isPlaying}
+                liked={liked}
+                crates={crates}
+                onPlay={(id) => playSong(id, queue)}
+                onLike={toggleLike}
+                onAdd={addToCrate}
+              />
             </Section>
           )}
 
@@ -981,8 +1050,8 @@ function RecCard({ song, isPlaying, liked, crates, onPlay, onLike, onAdd }) {
           <button className="icon-btn small" onClick={() => setOpenAdd((o) => !o)}><Plus size={14} /></button>
           {openAdd && (
             <div className="add-menu">
-              {Object.keys(crates).length === 0 && <div className="add-menu-empty">No crates yet</div>}
-              {Object.keys(crates).map((name) => <button key={name} onClick={() => { onAdd(name); setOpenAdd(false); }}>{name}</button>)}
+              {Object.keys(crates).filter((n) => crates[n].length > 0).length === 0 && <div className="add-menu-empty">No crates yet</div>}
+              {Object.keys(crates).filter((n) => crates[n].length > 0).map((name) => <button key={name} onClick={() => { onAdd(name); setOpenAdd(false); }}>{name}</button>)}
             </div>
           )}
         </div>
@@ -1022,8 +1091,8 @@ function TrackAdd({ crates, onAdd }) {
       <button className="icon-btn small" onClick={() => setOpen((o) => !o)}><Plus size={14} /></button>
       {open && (
         <div className="add-menu">
-          {Object.keys(crates).length === 0 && <div className="add-menu-empty">No crates yet</div>}
-          {Object.keys(crates).map((name) => <button key={name} onClick={() => { onAdd(name); setOpen(false); }}>{name}</button>)}
+          {Object.keys(crates).filter((n) => crates[n].length > 0).length === 0 && <div className="add-menu-empty">No crates yet</div>}
+          {Object.keys(crates).filter((n) => crates[n].length > 0).map((name) => <button key={name} onClick={() => { onAdd(name); setOpen(false); }}>{name}</button>)}
         </div>
       )}
     </div>
