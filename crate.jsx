@@ -479,6 +479,8 @@ export default function CrateApp() {
   // from playSong rather than via a useEffect keyed on nowPlaying, since
   // re-clicking an already-playing track leaves nowPlaying unchanged and a
   // React effect wouldn't re-fire for that (this will, every time).
+  const pendingAdvanceRef = useRef(null);
+
   function generateRadioFor(song) {
     if (!ytServer) { setYtRadio([]); return; }
     setYtRadioLoading(true);
@@ -493,6 +495,14 @@ export default function CrateApp() {
         });
         activeQueueRef.current = [song.id, ...tracks.map((t) => t.id)];
         setYtRadio(tracks);
+        // If "next" was clicked (or the track ended) before this fetch
+        // resolved, that request was deferred instead of wrapping back
+        // onto the same song — apply it now that the real queue exists.
+        if (pendingAdvanceRef.current != null) {
+          const dir = pendingAdvanceRef.current;
+          pendingAdvanceRef.current = null;
+          advanceRef.current(dir);
+        }
       })
       .catch(() => setYtRadio([]))
       .finally(() => setYtRadioLoading(false));
@@ -500,6 +510,15 @@ export default function CrateApp() {
 
   function advance(dir) {
     const ids = activeQueueRef.current.length ? activeQueueRef.current : rec.items.map((s) => s.id);
+    // While a standalone song's radio is still being generated, the queue
+    // is just a one-song placeholder — advancing would mathematically
+    // wrap back onto that same song and (worse) permanently mark it as
+    // "already queued," disabling radio generation for it entirely.
+    // Defer the skip instead of doing that.
+    if (ids.length <= 1 && standaloneRef.current) {
+      pendingAdvanceRef.current = dir;
+      return;
+    }
     const idx = ids.indexOf(nowPlaying);
     let next;
     if (idx === -1) next = ids[0];
