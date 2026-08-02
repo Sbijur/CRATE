@@ -221,17 +221,20 @@ def parse_iso_duration(iso: str) -> int:
 MUSIC_CATEGORY_ID = "10"
 
 def fetch_video_meta(video_ids):
-    """Batch-fetch duration + category for up to 50 video IDs at a time.
-    Returns {videoId: {"dur": seconds, "categoryId": "10"}}."""
+    """Batch-fetch duration + category + topics + live-status for up to 50
+    video IDs at a time."""
     meta = {}
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i:i + 50]
         try:
-            resp = youtube.videos().list(part="contentDetails,snippet", id=",".join(chunk)).execute()
+            resp = youtube.videos().list(part="contentDetails,snippet,topicDetails", id=",".join(chunk)).execute()
             for item in resp.get("items", []):
+                sn = item.get("snippet", {})
                 meta[item["id"]] = {
                     "dur": parse_iso_duration(item["contentDetails"]["duration"]),
-                    "categoryId": item.get("snippet", {}).get("categoryId"),
+                    "categoryId": sn.get("categoryId"),
+                    "liveBroadcastContent": sn.get("liveBroadcastContent"),
+                    "topicCategories": item.get("topicDetails", {}).get("topicCategories", []),
                 }
         except HttpError:
             pass
@@ -254,18 +257,53 @@ BAD_TITLES = {"deleted video", "private video"}
 
 
 MAX_SONG_SECONDS = 15 * 60  # anything longer is almost certainly a podcast/episode/full concert, not a song
+MIN_SONG_SECONDS = 60       # Shorts, reaction clips, and commentary snippets are reliably under a minute; real songs essentially never are
 
-def normalize_search_item(item, durations):
+# Category 10 ("Music") is uploader-chosen and often wrong/lazy — these two
+# checks use YouTube's own separate, more reliable signals instead.
+BLOCKED_TITLE_KEYWORDS = [
+    "reaction", "react", "interview", "podcast", "episode", "#shorts",
+    "tutorial", "review", "unboxing", "vlog", "compilation", "trailer",
+    "documentary",
+]
+
+def has_blocked_keyword(title):
+    t = title.lower()
+    return any(kw in t for kw in BLOCKED_TITLE_KEYWORDS)
+
+
+def has_music_topic(topic_categories):
+    """YouTube's own auto-classified subject-matter tags (Wikipedia-based),
+    independent of the uploader-chosen category. Returns None (unknown,
+    don't fail closed) if no topics were returned at all, rather than
+    treating missing data as "not music"."""
+    if not topic_categories:
+        return None
+    return any("music" in t.lower() for t in topic_categories)
+
+
+def is_live_or_upcoming(live_broadcast_content):
+    return (live_broadcast_content or "none") != "none"
+
+
+def normalize_search_item(item, meta):
     vid = item["id"]["videoId"]
     sn = item["snippet"]
     title = sn.get("title", "")
     if title.strip().lower() in BAD_TITLES or not title.strip():
         return None
+    if has_blocked_keyword(title):
+        return None
+    if is_live_or_upcoming(sn.get("liveBroadcastContent")):
+        return None
     artist = clean_artist(sn.get("channelTitle"))
     if artist == "Unknown artist":
         return None
-    dur = durations.get(vid, 0)
-    if dur > MAX_SONG_SECONDS:
+    m = meta.get(vid, {})
+    dur = m.get("dur", 0)
+    if dur > MAX_SONG_SECONDS or dur < MIN_SONG_SECONDS:
+        return None
+    if has_music_topic(m.get("topicCategories")) is False:
         return None
     thumbs = sn.get("thumbnails", {})
     return {
@@ -288,6 +326,8 @@ def normalize_playlist_item(item, meta):
     # instead of showing "Deleted video" / "Unknown artist" as if real.
     if title.strip().lower() in BAD_TITLES or not title.strip():
         return None
+    if has_blocked_keyword(title):
+        return None
     artist = clean_artist(sn.get("videoOwnerChannelTitle"))
     if artist == "Unknown artist":
         return None
@@ -297,6 +337,12 @@ def normalize_playlist_item(item, meta):
         return None  # deleted/private videos also consistently show 0:00 — extra safety net
     if dur > MAX_SONG_SECONDS:
         return None  # a saved podcast episode, full concert, etc. — not a "song"
+    if dur < MIN_SONG_SECONDS:
+        return None  # a saved Short or clip, not a full song
+    if is_live_or_upcoming(m.get("liveBroadcastContent")):
+        return None
+    if has_music_topic(m.get("topicCategories")) is False:
+        return None
     # Playlists (unlike search) were never actually filtered by category —
     # this closes that gap: only keep videos YouTube itself classifies as Music.
     if m.get("categoryId") is not None and m.get("categoryId") != MUSIC_CATEGORY_ID:
@@ -323,54 +369,59 @@ def normalize_title_for_dedup(title):
 
 
 def do_search(q, limit, exclude_video_id=None, exclude_title=None):
-    try:
-        # Over-fetch a bit so that after prioritizing clean "Topic" channel
-        # uploads (YouTube's auto-generated canonical song entries — the
-        # closest thing to an actual "song" vs. general music-category
-        # video content like concerts or reaction videos), there's still
-        # enough left to fill out the requested count.
-        resp = youtube.search().list(
-            part="snippet", q=q, type="video", videoCategoryId="10", maxResults=max(limit * 2, 20)
-        ).execute()
-    except HttpError as e:
-        raise HTTPException(status_code=502, detail=f"YouTube search failed: {e}")
-    items = resp.get("items", [])
-    if exclude_video_id:
-        items = [it for it in items if it.get("id", {}).get("videoId") != exclude_video_id]
-
-    # The same song frequently exists as multiple separate re-uploads with
-    # different video IDs — excluding just the one exact ID isn't enough,
-    # or "radio" ends up looping back onto the same track it started from.
-    # Dedupe by normalized title: against the seed track, AND among the
-    # results themselves.
+    collected = []  # (normalized, raw) pairs that survived filtering
     seen_titles = set()
     if exclude_title:
         seen_titles.add(normalize_title_for_dedup(exclude_title))
-    deduped = []
-    for it in items:
-        key = normalize_title_for_dedup(it["snippet"].get("title", ""))
-        if key in seen_titles:
-            continue
-        seen_titles.add(key)
-        deduped.append(it)
-    items = deduped
 
-    video_ids = [it["id"]["videoId"] for it in items if it.get("id", {}).get("videoId")]
-    durations = fetch_durations(video_ids)
+    page_token = None
+    max_pages = 5  # bounds total API calls/latency — up to ~250 raw candidates scanned
+    for _ in range(max_pages):
+        try:
+            resp = youtube.search().list(
+                part="snippet", q=q, type="video", videoCategoryId="10",
+                maxResults=50, pageToken=page_token
+            ).execute()
+        except HttpError as e:
+            if not collected:
+                raise HTTPException(status_code=502, detail=f"YouTube search failed: {e}")
+            break  # already have some results — return what we've got rather than fail
 
-    paired = []  # (normalized, raw) — kept together so filtering can't misalign them
-    for it in items:
-        if not it.get("id", {}).get("videoId"):
-            continue
-        normalized = normalize_search_item(it, durations)
-        if normalized:
-            paired.append((normalized, it))
+        items = resp.get("items", [])
+        if exclude_video_id:
+            items = [it for it in items if it.get("id", {}).get("videoId") != exclude_video_id]
+
+        # The same song frequently exists as multiple separate re-uploads
+        # with different video IDs — dedupe by normalized title, against
+        # the seed track and across every page fetched so far.
+        fresh = []
+        for it in items:
+            key = normalize_title_for_dedup(it["snippet"].get("title", ""))
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            fresh.append(it)
+
+        video_ids = [it["id"]["videoId"] for it in fresh if it.get("id", {}).get("videoId")]
+        meta = fetch_video_meta(video_ids)
+        for it in fresh:
+            if not it.get("id", {}).get("videoId"):
+                continue
+            normalized = normalize_search_item(it, meta)
+            if normalized:
+                collected.append((normalized, it))
+
+        if len(collected) >= limit:
+            break
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break  # YouTube has nothing more to offer for this query
 
     def is_topic_channel(raw):
         return raw["snippet"].get("channelTitle", "").endswith(" - Topic")
 
-    topic_items = [n for n, raw in paired if is_topic_channel(raw)]
-    other_items = [n for n, raw in paired if not is_topic_channel(raw)]
+    topic_items = [n for n, raw in collected if is_topic_channel(raw)]
+    other_items = [n for n, raw in collected if not is_topic_channel(raw)]
     return (topic_items + other_items)[:limit]
 
 
