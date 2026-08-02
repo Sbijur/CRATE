@@ -1,0 +1,13 @@
+google_token.json
+secrets.local.json
+playlist_cache.json
+__pycache__/
+*.pyc
+node_modules/
+dist/
+
+# Obsolete — kept only if you haven't deleted them yet, no longer used:
+oauth.json
+browser.json
+curl.txt
+browser-profile/
