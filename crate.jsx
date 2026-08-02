@@ -195,7 +195,7 @@ export default function CrateApp() {
     setYtError(null);
     const handle = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=12`);
+        const res = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=24`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || `Server responded ${res.status}`);
