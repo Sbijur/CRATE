@@ -218,18 +218,29 @@ def parse_iso_duration(iso: str) -> int:
     return h * 3600 + mn * 60 + s
 
 
-def fetch_durations(video_ids):
-    """Batch-fetch durations for up to 50 video IDs at a time."""
-    durations = {}
+MUSIC_CATEGORY_ID = "10"
+
+def fetch_video_meta(video_ids):
+    """Batch-fetch duration + category for up to 50 video IDs at a time.
+    Returns {videoId: {"dur": seconds, "categoryId": "10"}}."""
+    meta = {}
     for i in range(0, len(video_ids), 50):
         chunk = video_ids[i:i + 50]
         try:
-            resp = youtube.videos().list(part="contentDetails", id=",".join(chunk)).execute()
+            resp = youtube.videos().list(part="contentDetails,snippet", id=",".join(chunk)).execute()
             for item in resp.get("items", []):
-                durations[item["id"]] = parse_iso_duration(item["contentDetails"]["duration"])
+                meta[item["id"]] = {
+                    "dur": parse_iso_duration(item["contentDetails"]["duration"]),
+                    "categoryId": item.get("snippet", {}).get("categoryId"),
+                }
         except HttpError:
             pass
-    return durations
+    return meta
+
+
+def fetch_durations(video_ids):
+    """Kept for compatibility — durations only, no category."""
+    return {vid: m["dur"] for vid, m in fetch_video_meta(video_ids).items()}
 
 
 def clean_artist(channel_title: str) -> str:
@@ -242,6 +253,8 @@ def clean_artist(channel_title: str) -> str:
 BAD_TITLES = {"deleted video", "private video"}
 
 
+MAX_SONG_SECONDS = 15 * 60  # anything longer is almost certainly a podcast/episode/full concert, not a song
+
 def normalize_search_item(item, durations):
     vid = item["id"]["videoId"]
     sn = item["snippet"]
@@ -251,17 +264,20 @@ def normalize_search_item(item, durations):
     artist = clean_artist(sn.get("channelTitle"))
     if artist == "Unknown artist":
         return None
+    dur = durations.get(vid, 0)
+    if dur > MAX_SONG_SECONDS:
+        return None
     thumbs = sn.get("thumbnails", {})
     return {
         "videoId": vid,
         "title": title,
         "artist": artist,
-        "dur": durations.get(vid, 0),
+        "dur": dur,
         "thumbnail": (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
     }
 
 
-def normalize_playlist_item(item, durations):
+def normalize_playlist_item(item, meta):
     sn = item["snippet"]
     vid = sn.get("resourceId", {}).get("videoId")
     if not vid:
@@ -275,9 +291,16 @@ def normalize_playlist_item(item, durations):
     artist = clean_artist(sn.get("videoOwnerChannelTitle"))
     if artist == "Unknown artist":
         return None
-    dur = durations.get(vid, 0)
+    m = meta.get(vid, {})
+    dur = m.get("dur", 0)
     if dur == 0:
         return None  # deleted/private videos also consistently show 0:00 — extra safety net
+    if dur > MAX_SONG_SECONDS:
+        return None  # a saved podcast episode, full concert, etc. — not a "song"
+    # Playlists (unlike search) were never actually filtered by category —
+    # this closes that gap: only keep videos YouTube itself classifies as Music.
+    if m.get("categoryId") is not None and m.get("categoryId") != MUSIC_CATEGORY_ID:
+        return None
     thumbs = sn.get("thumbnails", {})
     return {
         "videoId": vid,
@@ -378,8 +401,8 @@ def fetch_playlist_tracks(playlist_id):
             break
     video_ids = [it["snippet"].get("resourceId", {}).get("videoId") for it in items]
     video_ids = [v for v in video_ids if v]
-    durations = fetch_durations(video_ids)
-    tracks = [normalize_playlist_item(it, durations) for it in items]
+    meta = fetch_video_meta(video_ids)
+    tracks = [normalize_playlist_item(it, meta) for it in items]
     return [t for t in tracks if t]
 
 
