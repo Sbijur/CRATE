@@ -477,7 +477,7 @@ export default function CrateApp() {
   function generateRadioFor(song) {
     if (!ytServer) { setYtRadio([]); return; }
     setYtRadioLoading(true);
-    apiFetch(`/api/radio/${song.videoId}?limit=8&artist=${encodeURIComponent(song.artist)}`)
+    apiFetch(`/api/radio/${song.videoId}?limit=8&artist=${encodeURIComponent(song.artist)}&title=${encodeURIComponent(song.title)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((items) => {
         const tracks = items.map(trackFromApi);
@@ -618,7 +618,7 @@ export default function CrateApp() {
 
   const current = nowPlaying != null ? resolve(nowPlaying) : null;
   const ytResultSongs = ytResults.map(resolve).filter(Boolean);
-  const crateNames = Object.keys(crates);
+  const crateNames = Object.keys(crates).filter((name) => crates[name].length > 0);
 
   return (
     <div className="crate-app">
@@ -1018,8 +1018,8 @@ function RecCard({ song, isPlaying, liked, crates, onPlay, onLike, onAdd }) {
           <button className="icon-btn small" onClick={() => setOpenAdd((o) => !o)}><Plus size={14} /></button>
           {openAdd && (
             <div className="add-menu">
-              {Object.keys(crates).length === 0 && <div className="add-menu-empty">No crates yet</div>}
-              {Object.keys(crates).map((name) => <button key={name} onClick={() => { onAdd(name); setOpenAdd(false); }}>{name}</button>)}
+              {Object.keys(crates).filter((n) => crates[n].length > 0).length === 0 && <div className="add-menu-empty">No crates yet</div>}
+              {Object.keys(crates).filter((n) => crates[n].length > 0).map((name) => <button key={name} onClick={() => { onAdd(name); setOpenAdd(false); }}>{name}</button>)}
             </div>
           )}
         </div>
@@ -1059,8 +1059,8 @@ function TrackAdd({ crates, onAdd }) {
       <button className="icon-btn small" onClick={() => setOpen((o) => !o)}><Plus size={14} /></button>
       {open && (
         <div className="add-menu">
-          {Object.keys(crates).length === 0 && <div className="add-menu-empty">No crates yet</div>}
-          {Object.keys(crates).map((name) => <button key={name} onClick={() => { onAdd(name); setOpen(false); }}>{name}</button>)}
+          {Object.keys(crates).filter((n) => crates[n].length > 0).length === 0 && <div className="add-menu-empty">No crates yet</div>}
+          {Object.keys(crates).filter((n) => crates[n].length > 0).map((name) => <button key={name} onClick={() => { onAdd(name); setOpen(false); }}>{name}</button>)}
         </div>
       )}
     </div>
