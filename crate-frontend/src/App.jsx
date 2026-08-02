@@ -181,6 +181,28 @@ export default function CrateApp() {
   const [ytApiReady, setYtApiReady] = useState(false);
   const [playerMinimized, setPlayerMinimized] = useState(true);
   const [queuePanelOpen, setQueuePanelOpen] = useState(false);
+  const [queuePos, setQueuePos] = useState(null); // null = default CSS position; {x,y} once dragged
+  const dragStateRef = useRef(null);
+
+  function startDrag(e) {
+    const panel = e.currentTarget.closest(".queue-float");
+    const rect = panel.getBoundingClientRect();
+    dragStateRef.current = { offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top };
+    const onMove = (ev) => {
+      if (!dragStateRef.current) return;
+      setQueuePos({
+        x: Math.max(0, Math.min(window.innerWidth - 340, ev.clientX - dragStateRef.current.offsetX)),
+        y: Math.max(0, Math.min(window.innerHeight - 100, ev.clientY - dragStateRef.current.offsetY)),
+      });
+    };
+    const onUp = () => {
+      dragStateRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
   const playerRef = useRef(null);
   const pendingVideoIdRef = useRef(null);
   const advanceRef = useRef(() => {});
@@ -515,10 +537,53 @@ export default function CrateApp() {
       return;
     }
     const idx = ids.indexOf(nowPlaying);
+
+    // Reaching the end of an auto-generated radio queue, going forward —
+    // extend it with more results instead of looping back to track 1,
+    // the way a real continuous radio does. (Finite lists like a saved
+    // crate or Fresh Picks are left to loop normally — only the
+    // open-ended standalone radio behaves like this.)
+    if (dir === 1 && standaloneRef.current && idx === ids.length - 1 && queueRef.current.length > 1) {
+      extendQueue();
+      return;
+    }
+
     let next;
     if (idx === -1) next = ids[0];
     else next = ids[(idx + dir + ids.length) % ids.length];
     if (next != null) playSong(next, queueRef.current.length ? queueRef.current : rec.items);
+  }
+
+  function extendQueue() {
+    const currentQueue = queueRef.current;
+    const lastSong = currentQueue[currentQueue.length - 1];
+    if (!lastSong || !ytServer) return;
+    setQueueLoading(true);
+    const existingIds = new Set(currentQueue.map((s) => s.id));
+    apiFetch(`/api/radio/${lastSong.videoId}?limit=8&artist=${encodeURIComponent(lastSong.artist)}&title=${encodeURIComponent(lastSong.title)}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((items) => {
+        const tracks = items.map(trackFromApi).filter((t) => !existingIds.has(t.id));
+        if (tracks.length === 0) {
+          // Nothing new found — fall back to looping rather than getting stuck.
+          const ids = currentQueue.map((s) => s.id);
+          if (ids.length) playSong(ids[0], currentQueue);
+          return;
+        }
+        setYtTracks((prev) => {
+          const merged = { ...prev };
+          tracks.forEach((t) => (merged[t.id] = t));
+          return merged;
+        });
+        const newQueue = [...currentQueue, ...tracks];
+        setQueue(newQueue);
+        playSong(tracks[0].id, newQueue);
+      })
+      .catch(() => {
+        const ids = currentQueue.map((s) => s.id);
+        if (ids.length) playSong(ids[0], currentQueue);
+      })
+      .finally(() => setQueueLoading(false));
   }
   useEffect(() => { advanceRef.current = advance; });
 
@@ -918,8 +983,11 @@ export default function CrateApp() {
           underneath it. Closed by default; opened via the queue button
           in the play bar. */}
       {queuePanelOpen && current && queue.length > 1 && (
-        <div className="queue-float">
-          <div className="queue-float-head">
+        <div
+          className="queue-float"
+          style={queuePos ? { left: queuePos.x, top: queuePos.y, right: "auto", bottom: "auto" } : undefined}
+        >
+          <div className="queue-float-head" onMouseDown={startDrag}>
             <span>
               <ListMusic size={13} />
               {queueLoading ? "Finding more like this…"
@@ -1121,6 +1189,7 @@ function TrackAdd({ crates, onAdd }) {
 
 /* ------------------------------------------------------------------ */
 const CSS = `
+html, body, #root { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: none !important; height: 100% !important; }
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap');
 
 .crate-app {
@@ -1130,7 +1199,7 @@ const CSS = `
   font-family: 'Inter', sans-serif;
   background: var(--bg); color: var(--text);
   display: grid; grid-template-columns: 240px 1fr; grid-template-rows: 1fr auto;
-  height: 100vh; min-height: 640px; overflow: hidden; position: relative;
+  height: 100vh; width: 100%; min-height: 640px; overflow: hidden; position: relative;
 }
 .crate-app * { box-sizing: border-box; }
 .crate-app button { font-family: inherit; cursor: pointer; background: none; border: none; color: inherit; }
@@ -1271,7 +1340,7 @@ const CSS = `
 .yt-float.minimized .yt-target-wrap { height: 0; }
 
 .queue-float { position: fixed; left: 24px; bottom: 92px; width: 340px; max-height: 70vh; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 12px 30px rgba(0,0,0,0.5); z-index: 40; display: flex; flex-direction: column; }
-.queue-float-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-size: 12px; font-weight: 600; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.queue-float-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-size: 12px; font-weight: 600; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; cursor: move; user-select: none; }
 .queue-float-head span { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--gold); }
 .queue-float-head button { color: var(--text-dim); flex-shrink: 0; }
 .queue-float-head button:hover { color: var(--text); }
