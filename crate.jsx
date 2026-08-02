@@ -180,6 +180,7 @@ export default function CrateApp() {
   const [everPlayed, setEverPlayed] = useState(false);
   const [ytApiReady, setYtApiReady] = useState(false);
   const [playerMinimized, setPlayerMinimized] = useState(true);
+  const [queuePanelOpen, setQueuePanelOpen] = useState(false);
   const playerRef = useRef(null);
   const pendingVideoIdRef = useRef(null);
   const advanceRef = useRef(() => {});
@@ -734,27 +735,6 @@ export default function CrateApp() {
         </header>
 
         <div className="content">
-          {current && (queueLoading || queue.length > 1) && (
-            <Section
-              title="Up Next"
-              sub={
-                queueLoading ? "Finding more like this…"
-                : standaloneRef.current ? `Generated for “${current.title}”`
-                : "Continuing this list"
-              }
-            >
-              <TrackList
-                songs={queue.filter((s) => s.id !== nowPlaying)}
-                nowPlaying={nowPlaying}
-                isPlaying={isPlaying}
-                liked={liked}
-                crates={crates}
-                onPlay={(id) => playSong(id, queue)}
-                onLike={toggleLike}
-                onAdd={addToCrate}
-              />
-            </Section>
-          )}
 
           {query.trim() ? (
             <Section
@@ -899,6 +879,16 @@ export default function CrateApp() {
               </div>
             </div>
             <div className="dock-right">
+              {queue.length > 1 && (
+                <button
+                  className={"icon-btn" + (queuePanelOpen ? " active-toggle" : "")}
+                  onClick={() => setQueuePanelOpen((o) => !o)}
+                  title="Up next"
+                >
+                  <ListMusic size={16} />
+                  <span className="queue-badge">{queue.length}</span>
+                </button>
+              )}
               <Volume2 size={15} />
               <input type="range" min="0" max="100" value={volume} onChange={(e) => handleVolume(+e.target.value)} />
             </div>
@@ -919,6 +909,36 @@ export default function CrateApp() {
           )}
           <div className="yt-target-wrap">
             <div id="ytplayer-target" />
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible "Up Next" panel — a small floating window, not an
+          inline section, so it never blocks navigating to other views
+          underneath it. Closed by default; opened via the queue button
+          in the play bar. */}
+      {queuePanelOpen && current && queue.length > 1 && (
+        <div className="queue-float">
+          <div className="queue-float-head">
+            <span>
+              <ListMusic size={13} />
+              {queueLoading ? "Finding more like this…"
+                : standaloneRef.current ? `Generated for “${current.title}”`
+                : "Up next"}
+            </span>
+            <button onClick={() => setQueuePanelOpen(false)}><X size={14} /></button>
+          </div>
+          <div className="queue-float-body">
+            <TrackList
+              songs={queue}
+              nowPlaying={nowPlaying}
+              isPlaying={isPlaying}
+              liked={liked}
+              crates={crates}
+              onPlay={(id) => playSong(id, queue)}
+              onLike={toggleLike}
+              onAdd={addToCrate}
+            />
           </div>
         </div>
       )}
@@ -1249,6 +1269,16 @@ const CSS = `
 .yt-float-head svg:first-child { color: var(--ytred); flex-shrink: 0; }
 .yt-target-wrap { height: 180px; overflow: hidden; }
 .yt-float.minimized .yt-target-wrap { height: 0; }
+
+.queue-float { position: fixed; left: 24px; bottom: 92px; width: 340px; max-height: 70vh; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 12px 30px rgba(0,0,0,0.5); z-index: 40; display: flex; flex-direction: column; }
+.queue-float-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-size: 12px; font-weight: 600; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.queue-float-head span { display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--gold); }
+.queue-float-head button { color: var(--text-dim); flex-shrink: 0; }
+.queue-float-head button:hover { color: var(--text); }
+.queue-float-body { overflow-y: auto; padding: 4px 10px; }
+.queue-badge { position: absolute; top: 2px; right: 2px; background: var(--gold); color: #17130F; font-size: 9px; font-weight: 700; border-radius: 8px; min-width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; padding: 0 3px; font-family: 'Space Mono', monospace; }
+.icon-btn { position: relative; }
+.icon-btn.active-toggle { color: var(--gold); background: var(--surface2); }
 
 .modal-back { position: fixed; inset: 0; background: rgba(10,8,6,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 26px 26px 22px; max-width: 440px; position: relative; }
