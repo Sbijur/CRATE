@@ -565,7 +565,15 @@ export default function CrateApp() {
     if (next != null) playSong(next, queueRef.current.length ? queueRef.current : rec.items);
   }
 
-  function extendQueue() {
+  function handleQueueScroll(e) {
+    const el = e.currentTarget;
+    const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
+    if (nearBottom && !queueLoading && standaloneRef.current && queueRef.current.length > 1) {
+      extendQueue(false);
+    }
+  }
+
+  function extendQueue(autoPlay = true) {
     const currentQueue = queueRef.current;
     const lastSong = currentQueue[currentQueue.length - 1];
     if (!lastSong || !ytServer) return;
@@ -576,9 +584,11 @@ export default function CrateApp() {
       .then((items) => {
         const tracks = items.map(trackFromApi).filter((t) => !existingIds.has(t.id));
         if (tracks.length === 0) {
-          // Nothing new found — fall back to looping rather than getting stuck.
-          const ids = currentQueue.map((s) => s.id);
-          if (ids.length) playSong(ids[0], currentQueue);
+          // Nothing new found — fall back to looping rather than getting stuck (playback case only).
+          if (autoPlay) {
+            const ids = currentQueue.map((s) => s.id);
+            if (ids.length) playSong(ids[0], currentQueue);
+          }
           return;
         }
         setYtTracks((prev) => {
@@ -588,12 +598,16 @@ export default function CrateApp() {
         });
         const newQueue = [...currentQueue, ...tracks];
         setQueue(newQueue);
-        playSong(tracks[0].id, newQueue);
-        standaloneRef.current = true; // we're still in radio mode, just extended — playSong's queue check ran against stale state and would have cleared this
+        if (autoPlay) {
+          playSong(tracks[0].id, newQueue);
+          standaloneRef.current = true; // we're still in radio mode, just extended — playSong's queue check ran against stale state and would have cleared this
+        }
       })
       .catch(() => {
-        const ids = currentQueue.map((s) => s.id);
-        if (ids.length) playSong(ids[0], currentQueue);
+        if (autoPlay) {
+          const ids = currentQueue.map((s) => s.id);
+          if (ids.length) playSong(ids[0], currentQueue);
+        }
       })
       .finally(() => setQueueLoading(false));
   }
@@ -1007,7 +1021,7 @@ export default function CrateApp() {
             </span>
             <button onClick={() => setQueuePanelOpen(false)}><X size={14} /></button>
           </div>
-          <div className="queue-float-body">
+          <div className="queue-float-body" onScroll={handleQueueScroll}>
             <TrackList
               songs={queue}
               nowPlaying={nowPlaying}
